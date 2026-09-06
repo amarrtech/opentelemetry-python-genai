@@ -85,8 +85,9 @@ def _usage_metadata_candidates(
     llm_output: Any,
 ) -> list[Mapping[str, Any]]:
     candidates: list[Mapping[str, Any]] = []
-    usage_metadata = chat_generation.message.usage_metadata
-    if usage_metadata:
+    message = getattr(chat_generation, "message", None)
+    usage_metadata = getattr(message, "usage_metadata", None)
+    if isinstance(usage_metadata, Mapping):
         candidates.append(usage_metadata)
 
     generation_info = getattr(chat_generation, "generation_info", None)

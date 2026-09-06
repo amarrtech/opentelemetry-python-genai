@@ -37,6 +37,7 @@ from langchain_core.outputs import (
 
 from opentelemetry.instrumentation.genai.langchain.callback_handler import (
     OpenTelemetryLangChainCallbackHandler,
+    _usage_metadata_candidates,
 )
 from opentelemetry.instrumentation.genai.langchain.utils import (
     _legacy_function_call_request,
@@ -1731,37 +1732,48 @@ def test_extract_usage_tokens_ignores_bool_and_unknown_values():
         {"input_tokens": True, "output_tokens": "20"}
     ) == (None, None)
 
-    def test_legacy_function_call_finish_reason_produces_tool_call_request(
-        self,
-    ):
-        """Pre-tools OpenAI ``function_call`` must surface as a ToolCallRequestPart."""
-        run_id = _run_id()
-        handler, _, llm_inv = _make_handler_with_llm_invocation(run_id)
 
-        ai_msg = AIMessage(
-            content="",
-            additional_kwargs={
-                "function_call": {
-                    "name": "get_weather",
-                    "arguments": '{"city": "Paris"}',
-                }
-            },
-        )
-        gen = ChatGeneration(
-            message=ai_msg,
-            generation_info={"finish_reason": "function_call"},
-        )
-        response = LLMResult(generations=[[gen]])
+def test_usage_metadata_candidates_handles_missing_message_usage_metadata():
+    chat_generation = mock.Mock(
+        message=object(),
+        generation_info={},
+    )
+    llm_output = {"token_usage": {"prompt_tokens": 10}}
 
-        handler.on_llm_end(response=response, run_id=run_id)
+    assert _usage_metadata_candidates(chat_generation, llm_output) == [
+        llm_output["token_usage"]
+    ]
 
-        assigned: list[OutputMessage] = llm_inv.output_messages
-        assert len(assigned) == 1
-        assert len(assigned[0].parts) == 1
-        part = assigned[0].parts[0]
-        assert isinstance(part, ToolCallRequestPart)
-        assert part.name == "get_weather"
-        assert part.arguments == {"city": "Paris"}
+
+def test_legacy_function_call_finish_reason_produces_tool_call_request():
+    """Pre-tools OpenAI ``function_call`` must surface as a ToolCallRequestPart."""
+    run_id = _run_id()
+    handler, _, llm_inv = _make_handler_with_llm_invocation(run_id)
+
+    ai_msg = AIMessage(
+        content="",
+        additional_kwargs={
+            "function_call": {
+                "name": "get_weather",
+                "arguments": '{"city": "Paris"}',
+            }
+        },
+    )
+    gen = ChatGeneration(
+        message=ai_msg,
+        generation_info={"finish_reason": "function_call"},
+    )
+    response = LLMResult(generations=[[gen]])
+
+    handler.on_llm_end(response=response, run_id=run_id)
+
+    assigned: list[OutputMessage] = llm_inv.output_messages
+    assert len(assigned) == 1
+    assert len(assigned[0].parts) == 1
+    part = assigned[0].parts[0]
+    assert isinstance(part, ToolCallRequestPart)
+    assert part.name == "get_weather"
+    assert part.arguments == {"city": "Paris"}
 
 
 # ---------------------------------------------------------------------------
