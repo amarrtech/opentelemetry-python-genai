@@ -9,19 +9,21 @@ from opentelemetry.semconv._incubating.attributes import (
 )
 from opentelemetry.semconv.attributes import server_attributes
 from opentelemetry.trace import SpanKind, Tracer
+from opentelemetry.util.genai._instruments import _Instruments
 from opentelemetry.util.genai._invocation import (
     Error,
     GenAIInvocation,
     get_content_attributes,
 )
 from opentelemetry.util.genai.completion_hook import CompletionHook
-from opentelemetry.util.genai.metrics import InvocationMetricsRecorder
 from opentelemetry.util.genai.types import (
     InputMessage,
     MessagePart,
     OutputMessage,
+    SystemInstructionPart,
     ToolDefinition,
 )
+from opentelemetry.util.genai.utils import ContentCapturingMode
 from opentelemetry.util.types import AttributeValue
 
 
@@ -39,7 +41,7 @@ class AgentInvocation(GenAIInvocation):
     def __init__(
         self,
         tracer: Tracer,
-        metrics_recorder: InvocationMetricsRecorder,
+        instruments: _Instruments,
         logger: Logger,
         completion_hook: CompletionHook,
         *,
@@ -49,12 +51,13 @@ class AgentInvocation(GenAIInvocation):
         server_address: str | None = None,
         server_port: int | None = None,
         agent_name: str | None = None,
+        content_capturing_mode: ContentCapturingMode | None = None,
     ) -> None:
         """Use handler.invoke_local_agent() or handler.invoke_remote_agent() instead of calling this directly."""
         _operation_name = GenAI.GenAiOperationNameValues.INVOKE_AGENT.value
         super().__init__(
             tracer,
-            metrics_recorder,
+            instruments,
             logger,
             completion_hook,
             operation_name=_operation_name,
@@ -62,6 +65,7 @@ class AgentInvocation(GenAIInvocation):
             if agent_name
             else _operation_name,
             span_kind=span_kind,
+            content_capturing_mode=content_capturing_mode,
         )
         self._provider: str | None = provider
         self._request_model: str | None = request_model
@@ -90,15 +94,57 @@ class AgentInvocation(GenAIInvocation):
 
         self.input_tokens: int | None = None
         self.output_tokens: int | None = None
-        self.cache_creation_input_tokens: int | None = None
-        self.cache_read_input_tokens: int | None = None
+        self._cache_write_input_tokens: int | None = None
+        self._cache_read_input_tokens: int | None = None
 
         self.input_messages: list[InputMessage] = []
         self.output_messages: list[OutputMessage] = []
-        self.system_instruction: list[MessagePart] = []
+        self.system_instruction: (
+            list[SystemInstructionPart] | list[MessagePart]
+        ) = []
+        """System instructions for the agent. Passing ``MessagePart`` is deprecated; use ``SystemInstructionPart``."""
         self.tool_definitions: list[ToolDefinition] | None = None
 
         self._start(self._get_start_attributes())
+
+    @property
+    def cache_write_input_tokens(self) -> int | None:
+        """The number of cache write input tokens.
+
+        .. deprecated:: 1.3b0
+            Cache tokens are not reported on internal agent spans per semantic conventions.
+        """
+        return self._cache_write_input_tokens
+
+    @cache_write_input_tokens.setter
+    def cache_write_input_tokens(self, value: int | None) -> None:
+        self._cache_write_input_tokens = value
+
+    @property
+    def cache_creation_input_tokens(self) -> int | None:
+        """The number of cache creation input tokens.
+
+        .. deprecated:: 1.3b0
+            Cache tokens are not reported on internal agent spans per semantic conventions.
+        """
+        return self._cache_write_input_tokens
+
+    @cache_creation_input_tokens.setter
+    def cache_creation_input_tokens(self, value: int | None) -> None:
+        self._cache_write_input_tokens = value
+
+    @property
+    def cache_read_input_tokens(self) -> int | None:
+        """The number of cache read input tokens.
+
+        .. deprecated:: 1.3b0
+            Cache tokens are not reported on internal agent spans per semantic conventions.
+        """
+        return self._cache_read_input_tokens
+
+    @cache_read_input_tokens.setter
+    def cache_read_input_tokens(self, value: int | None) -> None:
+        self._cache_read_input_tokens = value
 
     @property
     def agent_name(self) -> str | None:
@@ -153,14 +199,6 @@ class AgentInvocation(GenAIInvocation):
         optional_attrs = (
             (GenAI.GEN_AI_USAGE_INPUT_TOKENS, self.input_tokens),
             (GenAI.GEN_AI_USAGE_OUTPUT_TOKENS, self.output_tokens),
-            (
-                GenAI.GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS,
-                self.cache_creation_input_tokens,
-            ),
-            (
-                GenAI.GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
-                self.cache_read_input_tokens,
-            ),
         )
         return {k: v for k, v in optional_attrs if v is not None}
 
@@ -171,6 +209,7 @@ class AgentInvocation(GenAIInvocation):
             system_instruction=self.system_instruction,
             tool_definitions=self.tool_definitions,
             for_span=True,
+            content_capturing_mode=self._content_capturing_mode,
         )
 
     def _get_metric_attributes(self) -> dict[str, AttributeValue]:
@@ -215,4 +254,4 @@ class AgentInvocation(GenAIInvocation):
             system_instruction=self.system_instruction,
             tool_definitions=self.tool_definitions,
         )
-        self._metrics_recorder.record(self)
+        self._record_client_metrics()
